@@ -1,0 +1,135 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  name          String?
+  password      String?   // Hashed password (optional for OAuth providers)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  accounts Account[]
+  sessions Session[]
+  calls    Call[]
+  
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  accountId         String
+  providerId        String
+  accessToken       String?
+  refreshToken      String?
+  expiresAt         DateTime?
+  password          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+  token     String   @unique
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([token])
+  @@map("sessions")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  @@unique([identifier, value])
+  @@index([identifier])
+  @@map("verifications")
+}
+
+model Call {
+  id                String          @id @default(cuid())
+  userId            String
+  targetNumber      String
+  twilioCallSid     String?         @unique
+  amdStrategy       String          // "twilio_native" | "jambonz" | "huggingface" | "gemini"
+  status            CallStatus      @default(PENDING)
+  amdResult         AmdResult?      @default(UNDECIDED)
+  amdConfidence     Float?
+  duration          Int?            // in seconds
+  errorMessage      String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amdEvents         AmdEvent[]
+  
+  @@index([userId])
+  @@index([createdAt])
+  @@index([amdStrategy])
+  @@map("calls")
+}
+
+model AmdEvent {
+  id            String   @id @default(cuid())
+  callId        String
+  eventType     String   // "detection_start", "human_detected", "machine_detected", "timeout", etc.
+  amdResult     AmdResult?
+  confidence    Float?
+  rawData       Json?    // Store webhook payloads, model outputs, etc.
+  timestamp     DateTime @default(now())
+  
+  call          Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+  
+  @@index([callId])
+  @@index([timestamp])
+  @@map("amd_events")
+}
+
+enum CallStatus {
+  PENDING
+  RINGING
+  ANSWERED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  BUSY
+  NO_ANSWER
+  CANCELED
+}
+
+enum AmdResult {
+  HUMAN
+  MACHINE
+  UNDECIDED
+  TIMEOUT
+}
