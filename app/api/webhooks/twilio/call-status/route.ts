@@ -148,6 +148,7 @@ export async function POST(request: NextRequest) {
     
     if (status === 'COMPLETED' && currentAmdResult === 'UNDECIDED') {
       const amdTimeoutSeconds = 60; // From TWILIO_CONFIG.machineDetectionTimeout (updated to 60)
+      const silenceTimeoutSeconds = 3; // 3 seconds of silence = fallback to human
       
       // Check if call duration is less than AMD timeout
       const endedBeforeAmd = callDurationSeconds !== null && callDurationSeconds < amdTimeoutSeconds;
@@ -166,16 +167,24 @@ export async function POST(request: NextRequest) {
       
       // Determine timeout reason
       let timeoutReason = 'unknown';
-      if (endedBeforeAmd) {
+      if (endedBeforeAmd && callDurationSeconds !== null && callDurationSeconds <= silenceTimeoutSeconds) {
+        // 3 seconds of silence = fallback to human (treat as human)
+        timeoutReason = `3s silence timeout - treating as human`;
+        updateData.amdResult = 'HUMAN';
+        updateData.amdConfidence = 0.6; // Lower confidence for timeout fallback
+      } else if (endedBeforeAmd) {
         timeoutReason = `Call ended after ${callDurationSeconds}s (before ${amdTimeoutSeconds}s AMD timeout)`;
+        updateData.amdResult = 'TIMEOUT';
+        updateData.amdConfidence = 0.5;
       } else if (!receivedAmdWebhook) {
         timeoutReason = 'No AMD webhook received before call completion';
+        updateData.amdResult = 'TIMEOUT';
+        updateData.amdConfidence = 0.5;
       } else {
         timeoutReason = 'AMD webhook received but no detection status provided';
+        updateData.amdResult = 'TIMEOUT';
+        updateData.amdConfidence = 0.5;
       }
-      
-      updateData.amdResult = 'TIMEOUT';
-      updateData.amdConfidence = 0.5;
       
       console.log(`[Call Status] ⚠️ Call ${call.id} completed without AMD result: ${timeoutReason}`);
       console.log(`[Call Status] ⚠️ This means AMD webhook was NOT received or did not contain status`);

@@ -23,8 +23,18 @@ export async function GET(request: NextRequest) {
   });
 }
 
+// Audio buffer for chunking (2-5 seconds of audio)
+// Twilio Media Streams send audio at 8kHz PCM, 16-bit, mono
+// 2 seconds = 16000 samples, 5 seconds = 40000 samples
+const AUDIO_BUFFER_SIZE = 32000; // ~2 seconds at 8kHz PCM
+const AUDIO_BUFFER_MAX = 80000; // ~5 seconds at 8kHz PCM
+
+// Store buffers per call
+const audioBuffers = new Map<string, Buffer>();
+
 /**
  * POST handler for testing audio chunks (fallback for non-WebSocket)
+ * Implements audio buffering: accumulate 2-5s WAV chunks before processing
  */
 export async function POST(request: NextRequest) {
   try {
@@ -46,21 +56,54 @@ export async function POST(request: NextRequest) {
     }
 
     // Get audio buffer
-    const audioBuffer = await request.arrayBuffer();
+    const audioChunk = Buffer.from(await request.arrayBuffer());
+    
+    // Accumulate audio chunks (buffer 2-5s of audio)
+    if (!audioBuffers.has(callId)) {
+      audioBuffers.set(callId, Buffer.alloc(0));
+    }
+    
+    const currentBuffer = audioBuffers.get(callId)!;
+    const newBuffer = Buffer.concat([currentBuffer, audioChunk]);
+    audioBuffers.set(callId, newBuffer);
 
-    // Process with detector
+    // Only process if we have enough audio (2-5 seconds)
+    if (newBuffer.length < AUDIO_BUFFER_SIZE) {
+      return Response.json({ success: true, buffering: true, bufferSize: newBuffer.length });
+    }
+
+    // Process with detector (convert PCM to WAV if needed)
     const detector = createAmdDetector(strategy as any);
     
     if (!detector.processAudioChunk) {
       return Response.json({ error: 'Strategy does not support audio processing' }, { status: 400 });
     }
 
-    // Twilio Media Streams typically send PCM format audio
-    const result = await detector.processAudioChunk(Buffer.from(audioBuffer), 'pcm');
+    // Convert PCM to WAV format for ML models (if needed)
+    // For now, pass as PCM - ML service will handle conversion
+    const audioToProcess = newBuffer.length > AUDIO_BUFFER_MAX 
+      ? newBuffer.slice(0, AUDIO_BUFFER_MAX) // Limit to 5 seconds
+      : newBuffer;
+
+    const result = await detector.processAudioChunk(audioToProcess, 'pcm');
+
+    // Clear buffer after processing
+    audioBuffers.delete(callId);
 
     if (result) {
-      // Update call if confidence is high enough
-      if (result.confidence >= 0.7) {
+      // Retry logic for low confidence (max 2 retries)
+      const existingEvents = await prisma.amdEvent.findMany({
+        where: {
+          callId: call.id,
+          eventType: { contains: 'retry' },
+        },
+      });
+      
+      const retryCount = existingEvents.length;
+      const maxRetries = 2;
+      
+      // Update call if confidence is high enough OR max retries reached
+      if (result.confidence >= 0.7 || retryCount >= maxRetries) {
         await prisma.call.update({
           where: { id: call.id },
           data: {
@@ -73,16 +116,27 @@ export async function POST(request: NextRequest) {
         await prisma.amdEvent.create({
           data: {
             callId: call.id,
-            eventType: 'amd_detection_complete',
+            eventType: retryCount > 0 ? 'amd_detection_complete_after_retry' : 'amd_detection_complete',
             amdResult: result.result,
             confidence: result.confidence,
-            rawData: result.rawData,
+            rawData: { ...result.rawData, bufferSize: audioToProcess.length, retryCount },
+          },
+        });
+      } else {
+        // Low confidence - log retry attempt
+        await prisma.amdEvent.create({
+          data: {
+            callId: call.id,
+            eventType: `amd_retry_${retryCount + 1}`,
+            amdResult: result.result,
+            confidence: result.confidence,
+            rawData: { ...result.rawData, retryReason: 'low_confidence', retryCount: retryCount + 1 },
           },
         });
       }
     }
 
-    return Response.json({ success: true, result });
+    return Response.json({ success: true, result, bufferSize: audioToProcess.length });
   } catch (error) {
     console.error('Media stream error:', error);
     return Response.json({ error: 'Internal error' }, { status: 500 });

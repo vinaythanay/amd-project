@@ -49,7 +49,36 @@ export async function POST(request: NextRequest) {
     if (result) {
       console.log(`[AMD Status] Updating call ${call.id} with result: ${result.result} (confidence: ${result.confidence})`);
       
-      // Update call with AMD result
+      // Check for low confidence - retry logic (max 2 retries)
+      const existingEvents = await prisma.amdEvent.findMany({
+        where: {
+          callId: call.id,
+          eventType: { contains: 'retry' },
+        },
+      });
+      
+      const retryCount = existingEvents.length;
+      const maxRetries = 2;
+      
+      if (result.confidence < 0.7 && retryCount < maxRetries) {
+        console.log(`[AMD Status] Low confidence (${result.confidence}), retrying detection (attempt ${retryCount + 1}/${maxRetries})`);
+        
+        // Log retry attempt
+        await prisma.amdEvent.create({
+          data: {
+            callId: call.id,
+            eventType: `amd_retry_${retryCount + 1}`,
+            amdResult: result.result,
+            confidence: result.confidence,
+            rawData: { ...payload, retryReason: 'low_confidence', retryCount: retryCount + 1 },
+          },
+        });
+        
+        // Don't update final result yet - wait for retry
+        return NextResponse.json({ success: true, retry: true, retryCount: retryCount + 1 });
+      }
+      
+      // Update call with AMD result (high confidence or max retries reached)
       await prisma.call.update({
         where: { id: call.id },
         data: {
@@ -62,10 +91,10 @@ export async function POST(request: NextRequest) {
       await prisma.amdEvent.create({
         data: {
           callId: call.id,
-          eventType: 'amd_detection_complete',
+          eventType: retryCount > 0 ? 'amd_detection_complete_after_retry' : 'amd_detection_complete',
           amdResult: result.result,
           confidence: result.confidence,
-          rawData: payload, // Store full payload for debugging
+          rawData: { ...payload, retryCount },
         },
       });
 

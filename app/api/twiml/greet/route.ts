@@ -70,10 +70,11 @@ async function handleGreet(request: NextRequest) {
       // Use Gather to continuously listen - this keeps the call active
       // When Gather times out, it will redirect back to this endpoint with listen=true
       // This creates a recursive loop that keeps listening without repeating the greeting
+      // Timeout: 3 seconds of silence = fallback to human (treat as human)
       const gather = response.gather({
         input: 'speech dtmf', // Listen for both speech and touch-tone
         timeout: 60, // Wait up to 60 seconds for input
-        speechTimeout: 'auto', // Auto-detect when user stops speaking
+        speechTimeout: 3, // 3 seconds of silence = timeout (fallback to human)
         action: listenUrl, // Redirect back to this endpoint when Gather completes
         method: 'POST', // Use POST for the redirect
       });
@@ -110,10 +111,11 @@ async function handleGreet(request: NextRequest) {
       const listenUrl = `${baseUrl}/api/twiml/greet?callId=${callId}&strategy=${strategy}&listen=true`;
       
       // Use Gather to continuously listen - recursive pattern
+      // Timeout: 3 seconds of silence = fallback to human (treat as human)
       const gather = response.gather({
         input: 'speech',
         timeout: 60,
-        speechTimeout: 'auto',
+        speechTimeout: 3, // 3 seconds of silence = timeout (fallback to human)
         action: listenUrl, // Redirect back to this endpoint when Gather completes
         method: 'POST',
       });

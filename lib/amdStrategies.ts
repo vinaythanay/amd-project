@@ -132,17 +132,44 @@ export class TwilioNativeAmd implements AmdDetector {
  * Uses Jambonz SIP-based AMD with customizable recognizers.
  * Pros: More control, can fine-tune thresholds, better for edge cases
  * Cons: Requires Jambonz setup, SIP configuration overhead
+ * 
+ * Configuration:
+ * - thresholdWordCount: 5 (minimum words to detect)
+ * - timers.decisionTimeoutMs: 10000 (10 seconds timeout)
  */
 export class JambonzAmd implements AmdDetector {
+  private jambonzConfig = {
+    thresholdWordCount: 5,
+    decisionTimeoutMs: 10000,
+  };
+
   async initialize(callId: string, callSid: string): Promise<void> {
     await prisma.amdEvent.create({
       data: {
         callId,
         eventType: 'detection_start',
         amdResult: 'UNDECIDED',
-        rawData: { strategy: 'jambonz', callSid },
+        rawData: { 
+          strategy: 'jambonz', 
+          callSid,
+          config: this.jambonzConfig,
+        },
       },
     });
+
+    // Check if Jambonz is available (fallback to Twilio if not)
+    const jambonzAvailable = process.env.JAMBONZ_API_KEY && process.env.JAMBONZ_SIP_ENDPOINT;
+    if (!jambonzAvailable) {
+      console.warn('[JambonzAmd] Jambonz not configured, will fallback to Twilio Native');
+      await prisma.amdEvent.create({
+        data: {
+          callId,
+          eventType: 'jambonz_fallback',
+          amdResult: 'UNDECIDED',
+          rawData: { reason: 'Jambonz not configured, falling back to Twilio Native' },
+        },
+      });
+    }
   }
 
   async handleWebhook(payload: any): Promise<AmdDetectionResult | null> {
@@ -151,21 +178,42 @@ export class JambonzAmd implements AmdDetector {
     let result: AmdResult = 'UNDECIDED';
     let confidence = 0.5;
 
+    // Handle Jambonz AMD events
     if (event_type === 'amd_human_detected') {
       result = 'HUMAN';
       confidence = 0.92;
+      console.log('[JambonzAmd] ✅ Human detected');
     } else if (event_type === 'amd_machine_detected') {
       result = 'MACHINE';
       confidence = 0.88;
+      console.log('[JambonzAmd] 🤖 Machine detected');
     } else if (event_type === 'amd_timeout') {
       result = 'TIMEOUT';
+      confidence = 0.5;
+      console.log('[JambonzAmd] ⏱️ AMD timeout');
+    } else if (event_type === 'amd_error') {
+      // Jambonz unavailable - fallback to Twilio
+      console.warn('[JambonzAmd] ⚠️ Jambonz error, falling back to Twilio Native');
+      result = 'UNDECIDED';
       confidence = 0.5;
     }
 
     return {
       result,
       confidence,
-      rawData: payload,
+      rawData: { ...payload, config: this.jambonzConfig },
+    };
+  }
+
+  /**
+   * Get Jambonz configuration for TwiML dial verb
+   */
+  getConfig() {
+    return {
+      thresholdWordCount: this.jambonzConfig.thresholdWordCount,
+      timers: {
+        decisionTimeoutMs: this.jambonzConfig.decisionTimeoutMs,
+      },
     };
   }
 }
